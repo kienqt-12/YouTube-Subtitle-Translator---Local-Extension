@@ -28,6 +28,7 @@ export interface SubtitleResponse {
   sentence_count: number;
   segments: SubtitleSegment[];
   cached: boolean;
+  cache_source?: 'extension' | 'backend';
 }
 
 export interface RuntimeResponse<T = unknown> {

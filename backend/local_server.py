@@ -1,6 +1,8 @@
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
+from urllib.parse import parse_qs, urlparse
 
 from subtitle_core import build_translated_subtitles, extract_video_id
 
@@ -8,8 +10,28 @@ from subtitle_core import build_translated_subtitles, extract_video_id
 HOST = "127.0.0.1"
 PORT = 8765
 LOCAL_API_KEY = "youtube-subtitle-local-v1"
+CACHE_VERSION = "v3"
 CACHE = {}
 CACHE_LOCK = Lock()
+PROGRESS = {}
+PROGRESS_LOCK = Lock()
+
+
+def update_progress(job_id, payload):
+    with PROGRESS_LOCK:
+        PROGRESS[job_id] = {
+            **PROGRESS.get(job_id, {}),
+            **payload,
+            "job_id": job_id,
+            "updated_at": time.time(),
+        }
+        if len(PROGRESS) > 100:
+            oldest = sorted(
+                PROGRESS,
+                key=lambda key: PROGRESS[key].get("updated_at", 0),
+            )[:20]
+            for key in oldest:
+                PROGRESS.pop(key, None)
 
 
 class LocalSubtitleHandler(BaseHTTPRequestHandler):
@@ -44,11 +66,24 @@ class LocalSubtitleHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/health":
+        parsed = urlparse(self.path)
+        if parsed.path == "/health":
             self.send_json(200, {
                 "status": "ok",
                 "service": "youtube-subtitle-local-api",
             })
+            return
+        if parsed.path == "/api/progress":
+            if self.headers.get("X-Local-Subtitle-Key") != LOCAL_API_KEY:
+                self.send_json(401, {"detail": "Invalid local API key"})
+                return
+            job_id = parse_qs(parsed.query).get("job_id", [""])[0]
+            with PROGRESS_LOCK:
+                progress = PROGRESS.get(job_id)
+            if not progress:
+                self.send_json(404, {"detail": "Progress job not found"})
+                return
+            self.send_json(200, progress)
             return
         self.send_json(404, {"detail": "Not found"})
 
@@ -72,29 +107,55 @@ class LocalSubtitleHandler(BaseHTTPRequestHandler):
             target_language = str(request.get("target_language", "vi"))
             pacing = str(request.get("pacing", "natural"))
             force_refresh = bool(request.get("force_refresh", False))
+            job_id = str(request.get("job_id") or f"{video_id}-{time.time_ns()}")[:128]
             if not video_id:
                 self.send_json(422, {"detail": "Invalid YouTube video ID"})
                 return
             if pacing not in {"short", "natural", "long"}:
                 pacing = "natural"
 
-            key = (video_id, target_language, pacing)
+            key = (CACHE_VERSION, video_id, target_language, pacing)
             if not force_refresh:
                 with CACHE_LOCK:
                     cached = CACHE.get(key)
                 if cached:
+                    update_progress(job_id, {
+                        "phase": "done",
+                        "completed": cached.get("sentence_count", 0),
+                        "total": cached.get("sentence_count", 0),
+                        "eta_seconds": 0,
+                    })
                     self.send_json(200, {**cached, "cached": True})
                     return
 
+            update_progress(job_id, {
+                "phase": "starting",
+                "completed": 0,
+                "total": 0,
+                "eta_seconds": None,
+            })
             result = build_translated_subtitles(
                 video_id,
                 target_language=target_language,
                 pacing=pacing,
+                progress_callback=lambda payload: update_progress(job_id, payload),
             )
             with CACHE_LOCK:
                 CACHE[key] = result
+            update_progress(job_id, {
+                "phase": "done",
+                "completed": result.get("sentence_count", 0),
+                "total": result.get("sentence_count", 0),
+                "eta_seconds": 0,
+            })
             self.send_json(200, {**result, "cached": False})
         except Exception as error:
+            if "job_id" in locals():
+                update_progress(job_id, {
+                    "phase": "error",
+                    "error": str(error)[:300],
+                    "eta_seconds": None,
+                })
             self.send_json(502, {"detail": str(error)[:500]})
 
 

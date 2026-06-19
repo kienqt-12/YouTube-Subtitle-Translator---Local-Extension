@@ -1,7 +1,9 @@
 import html
 import os
 import re
+import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from deep_translator import GoogleTranslator
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -100,6 +102,116 @@ def ends_spoken_sentence(text):
     return bool(re.search(r"[.!?…][\"'”’\])}]*$", text))
 
 
+TRAILING_CONNECTORS = {
+    "a", "an", "the", "and", "or", "but", "so", "because", "if",
+    "when", "while", "that", "which", "who", "whose", "where",
+    "of", "to", "for", "with", "from", "in", "on", "at", "by",
+    "as", "is", "are", "was", "were", "be", "been", "being",
+    "this", "these", "those", "its", "their", "our", "your",
+}
+
+
+def ends_incomplete_phrase(text):
+    words = re.findall(r"[A-Za-zÀ-ỹ0-9']+", text.lower())
+    return bool(words and words[-1] in TRAILING_CONNECTORS)
+
+
+def ends_clause_boundary(text):
+    return bool(re.search(r"[,;:][\"'”’\])}]*$", text))
+
+
+def _complete_sentence_parts(text):
+    completed = []
+    cursor = 0
+    boundary_pattern = re.compile(r"[.!?…][\"'”’\])}]*\s+")
+    for match in boundary_pattern.finditer(text):
+        candidate = text[cursor:match.end()].strip()
+        if candidate and ends_spoken_sentence(candidate):
+            completed.append(candidate)
+            cursor = match.end()
+    trailing = text[cursor:].strip()
+    if trailing and ends_spoken_sentence(trailing):
+        completed.append(trailing)
+        trailing = ""
+    return completed, trailing
+
+
+def refine_sentence_units(groups):
+    """Carry unfinished clauses forward and split multi-sentence caption blocks."""
+    refined = []
+    pending_text = ""
+    pending_start = None
+
+    for index, group in enumerate(groups):
+        group_start = float(group["start"])
+        group_end = float(group["end"])
+        if index + 1 < len(groups):
+            next_start = float(groups[index + 1]["start"])
+            if next_start > group_start:
+                group_end = min(group_end, next_start)
+        group_end = max(group_start + 0.35, group_end)
+        text = normalize_caption_text(group["text"])
+
+        is_sound_cue = bool(re.fullmatch(r"[\[(].+?[\])]", text))
+        if is_sound_cue:
+            if pending_text:
+                refined.append({
+                    "start": pending_start,
+                    "end": group_start,
+                    "duration": max(0.35, group_start - pending_start),
+                    "text": pending_text,
+                })
+                pending_text = ""
+                pending_start = None
+            refined.append({
+                "start": group_start,
+                "end": group_end,
+                "duration": group_end - group_start,
+                "text": text,
+            })
+            continue
+
+        combined = f"{pending_text} {text}".strip()
+        combined_start = pending_start if pending_start is not None else group_start
+        completed, trailing = _complete_sentence_parts(combined)
+        total_chars = max(1, len(combined))
+        cursor_time = combined_start
+        consumed_chars = 0
+
+        for sentence in completed:
+            consumed_chars += len(sentence)
+            sentence_end = combined_start + (
+                (group_end - combined_start) * consumed_chars / total_chars
+            )
+            sentence_end = max(cursor_time + 0.35, min(group_end, sentence_end))
+            refined.append({
+                "start": cursor_time,
+                "end": sentence_end,
+                "duration": sentence_end - cursor_time,
+                "text": sentence,
+            })
+            cursor_time = sentence_end
+
+        pending_text = trailing
+        pending_start = cursor_time if trailing else None
+
+    if pending_text:
+        final_end = max(pending_start + 0.35, float(groups[-1]["end"]))
+        refined.append({
+            "start": pending_start,
+            "end": final_end,
+            "duration": final_end - pending_start,
+            "text": pending_text,
+        })
+
+    for index, unit in enumerate(refined[:-1]):
+        next_start = refined[index + 1]["start"]
+        if next_start > unit["start"]:
+            unit["end"] = min(unit["end"], next_start)
+            unit["duration"] = max(0.35, unit["end"] - unit["start"])
+    return refined
+
+
 def merge_transcript_segments(segments, pause_threshold=0.8,
                               max_duration=11.0, max_chars=220):
     merged = []
@@ -126,16 +238,31 @@ def merge_transcript_segments(segments, pause_threshold=0.8,
         else:
             gap = start - current["end"]
             unique_text = remove_caption_overlap(current["text"], text)
-            combined = f"{current['text']} {unique_text}".strip()
-            too_long = (
-                end - current["start"] > max_duration
-                or len(combined) > max_chars
+            current_duration = current["end"] - current["start"]
+            soft_limit = (
+                current_duration >= max_duration
+                or len(current["text"]) >= max_chars
             )
-            if gap >= pause_threshold or too_long:
+            hard_limit = (
+                current_duration >= max_duration * 1.75
+                or len(current["text"]) >= int(max_chars * 1.6)
+            )
+            emergency_limit = (
+                current_duration >= max_duration * 2.2
+                or len(current["text"]) >= max_chars * 2
+            )
+            incomplete = ends_incomplete_phrase(current["text"])
+            should_break = (
+                (gap >= pause_threshold and not incomplete)
+                or (soft_limit and ends_clause_boundary(current["text"]))
+                or (hard_limit and not incomplete)
+                or emergency_limit
+            )
+            if should_break:
                 flush_current()
                 current = {"start": start, "end": end, "text": text}
             else:
-                current["text"] = combined
+                current["text"] = f"{current['text']} {unique_text}".strip()
                 current["end"] = max(current["end"], end)
 
         is_sound_cue = bool(re.fullmatch(r"[\[(].+?[\])]", current["text"]))
@@ -143,52 +270,164 @@ def merge_transcript_segments(segments, pause_threshold=0.8,
             flush_current()
 
     flush_current()
-    return merged
+    return refine_sentence_units(merged)
+
+
+DISPLAY_CONNECTORS = TRAILING_CONNECTORS | {
+    "và", "hoặc", "nhưng", "mà", "của", "để", "với", "trong",
+    "trên", "từ", "là", "một", "những", "các", "rằng", "khi",
+    "vì", "nếu",
+}
+
+
+def _display_word_key(word):
+    return re.sub(r"[^A-Za-zÀ-ỹ0-9']+", "", word).lower()
 
 
 def split_subtitle_text(text, max_chars=78, min_chars=34):
     words = normalize_caption_text(text).split()
     chunks = []
-    current_words = []
-    for word in words:
-        candidate = " ".join(current_words + [word])
-        if current_words and len(candidate) > max_chars:
-            chunks.append(" ".join(current_words))
-            current_words = [word]
-            continue
-        current_words.append(word)
-        current_text = " ".join(current_words)
-        if len(current_text) >= min_chars and re.search(
-            r"[,;:.!?…][\"'”’\])}]*$", word
+    remaining = list(words)
+
+    while remaining:
+        if len(" ".join(remaining)) <= max_chars:
+            chunks.append(" ".join(remaining))
+            break
+
+        fit = 1
+        for index in range(1, len(remaining) + 1):
+            if len(" ".join(remaining[:index])) <= max_chars:
+                fit = index
+            else:
+                break
+
+        minimum_length = min(min_chars, max_chars // 2)
+        punctuation_break = None
+        for index in range(fit, 0, -1):
+            candidate = " ".join(remaining[:index])
+            if len(candidate) < minimum_length:
+                break
+            if re.search(r"[,;:.!?…][\"'”’\])}]*$", remaining[index - 1]):
+                punctuation_break = index
+                break
+
+        break_at = punctuation_break or fit
+        while (
+            break_at > 1
+            and _display_word_key(remaining[break_at - 1]) in DISPLAY_CONNECTORS
         ):
-            chunks.append(current_text)
-            current_words = []
-    if current_words:
-        chunks.append(" ".join(current_words))
+            break_at -= 1
+        if break_at <= 0:
+            break_at = fit
+
+        chunks.append(" ".join(remaining[:break_at]))
+        remaining = remaining[break_at:]
+
+    if len(chunks) > 1 and len(chunks[-1]) < min_chars // 2:
+        combined = f"{chunks[-2]} {chunks[-1]}"
+        if len(combined) <= int(max_chars * 1.3):
+            chunks[-2:] = [combined]
     return chunks or [normalize_caption_text(text)]
 
 
 def translate_segments(segments, target_language="vi", source_language="auto",
-                       batch_size=25):
-    translator = GoogleTranslator(
-        source=source_language,
-        target=target_language,
-    )
+                       max_workers=2, max_request_chars=3500,
+                       progress_callback=None):
     texts = [segment["text"] for segment in segments]
-    translations = []
-    for index in range(0, len(texts), batch_size):
-        batch = texts[index:index + batch_size]
+
+    packs = []
+    current_pack = []
+    current_length = 0
+    marker_length = len("<<<SUBTITLE_BREAK_000000>>>") + 2
+    for index, text in enumerate(texts):
+        added_length = len(text) + (marker_length if current_pack else 0)
+        if current_pack and current_length + added_length > max_request_chars:
+            packs.append(current_pack)
+            current_pack = []
+            current_length = 0
+        current_pack.append((index, text))
+        current_length += len(text) + (marker_length if len(current_pack) > 1 else 0)
+    if current_pack:
+        packs.append(current_pack)
+
+    def translate_text(text):
+        last_error = None
+        for attempt in range(2):
+            try:
+                return GoogleTranslator(
+                    source=source_language,
+                    target=target_language,
+                ).translate(text)
+            except Exception as error:
+                last_error = error
+                if attempt == 0:
+                    time.sleep(0.35)
+        raise RuntimeError(f"Google Translate request failed: {last_error}")
+
+    def translate_pack(pack):
+        markers = [
+            f"<<<SUBTITLE_BREAK_{index:06d}>>>"
+            for index in range(len(pack) - 1)
+        ]
+        payload_parts = []
+        for item_index, (_original_index, text) in enumerate(pack):
+            payload_parts.append(text)
+            if item_index < len(markers):
+                payload_parts.append(markers[item_index])
+        payload = "\n".join(payload_parts)
+
         try:
-            translated_batch = translator.translate_batch(batch) or []
-            if len(translated_batch) != len(batch):
-                raise RuntimeError("Translation batch returned incomplete data")
-            translations.extend(translated_batch)
+            translated_payload = translate_text(payload)
+            marker_pattern = r"\s*<<<SUBTITLE_BREAK_\d{6}>>>\s*"
+            translated_parts = re.split(marker_pattern, translated_payload)
+            if len(translated_parts) != len(pack):
+                raise RuntimeError("Google Translate changed subtitle markers")
+            return [
+                (original_index, normalize_caption_text(translated))
+                for (original_index, _text), translated in zip(
+                    pack,
+                    translated_parts,
+                )
+            ]
         except Exception:
-            for text in batch:
-                try:
-                    translations.append(translator.translate(text))
-                except Exception:
-                    translations.append(text)
+            # Marker parsing can rarely fail. Retry only this small pack one
+            # sentence at a time instead of silently returning English text.
+            return [
+                (original_index, normalize_caption_text(translate_text(text)))
+                for original_index, text in pack
+            ]
+
+    translations = [None] * len(texts)
+    worker_count = max(1, min(max_workers, len(packs)))
+    started_at = time.perf_counter()
+    completed_sentences = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(translate_pack, pack): pack
+            for pack in packs
+        }
+        for future in as_completed(futures):
+            completed_pack = future.result()
+            for index, translated in completed_pack:
+                translations[index] = translated
+            completed_sentences += len(completed_pack)
+            if progress_callback:
+                elapsed = max(0.001, time.perf_counter() - started_at)
+                remaining = max(0, len(texts) - completed_sentences)
+                eta_seconds = (
+                    elapsed / completed_sentences * remaining
+                    if completed_sentences else None
+                )
+                progress_callback({
+                    "phase": "translating",
+                    "completed": completed_sentences,
+                    "total": len(texts),
+                    "elapsed_seconds": round(elapsed, 1),
+                    "eta_seconds": round(eta_seconds, 1) if eta_seconds is not None else None,
+                })
+
+    if any(translation is None for translation in translations):
+        raise RuntimeError("Translation returned incomplete subtitle data")
 
     result = []
     for segment, translated in zip(segments, translations):
@@ -210,16 +449,31 @@ def prepare_subtitle_segments(segments, max_chars=78):
         start = float(segment["start"])
         end = max(start + 0.35, float(segment.get("end", start + 2)))
         duration = end - start
+        max_cues = max(1, int(duration / 1.0))
+        while len(chunks) > max_cues:
+            merge_index = min(
+                range(len(chunks) - 1),
+                key=lambda index: len(chunks[index]) + len(chunks[index + 1]),
+            )
+            chunks[merge_index:merge_index + 2] = [
+                f"{chunks[merge_index]} {chunks[merge_index + 1]}"
+            ]
         weights = [max(1, len(chunk)) for chunk in chunks]
         total_weight = sum(weights)
-        elapsed_weight = 0
-        for index, (chunk, weight) in enumerate(zip(chunks, weights)):
-            chunk_start = start + duration * elapsed_weight / total_weight
-            elapsed_weight += weight
-            chunk_end = (
-                end if index == len(chunks) - 1
-                else start + duration * elapsed_weight / total_weight
-            )
+        minimum_cue_duration = min(0.9, duration / len(chunks))
+        flexible_duration = max(
+            0.0,
+            duration - minimum_cue_duration * len(chunks),
+        )
+        cue_durations = [
+            minimum_cue_duration + flexible_duration * weight / total_weight
+            for weight in weights
+        ]
+        cursor = start
+        for index, (chunk, cue_duration) in enumerate(zip(chunks, cue_durations)):
+            chunk_start = cursor
+            chunk_end = end if index == len(chunks) - 1 else cursor + cue_duration
+            cursor = chunk_end
             prepared.append({
                 "start": round(chunk_start, 3),
                 "end": round(chunk_end, 3),
@@ -238,11 +492,37 @@ PACING_PRESETS = {
 
 
 def build_translated_subtitles(video_id, target_language="vi",
-                               pacing="natural"):
+                               pacing="natural", progress_callback=None):
+    if progress_callback:
+        progress_callback({"phase": "fetching", "completed": 0, "total": 0})
     raw_segments = fetch_transcript_segments(video_id)
+    if progress_callback:
+        progress_callback({
+            "phase": "grouping",
+            "completed": len(raw_segments),
+            "total": len(raw_segments),
+        })
     preset = PACING_PRESETS.get(pacing, PACING_PRESETS["natural"])
     sentences = merge_transcript_segments(raw_segments, **preset)
-    translated = translate_segments(sentences, target_language=target_language)
+    if progress_callback:
+        progress_callback({
+            "phase": "translating",
+            "completed": 0,
+            "total": len(sentences),
+            "eta_seconds": None,
+        })
+    translated = translate_segments(
+        sentences,
+        target_language=target_language,
+        progress_callback=progress_callback,
+    )
+    if progress_callback:
+        progress_callback({
+            "phase": "formatting",
+            "completed": len(sentences),
+            "total": len(sentences),
+            "eta_seconds": 0,
+        })
     display_segments = prepare_subtitle_segments(translated)
     return {
         "video_id": video_id,

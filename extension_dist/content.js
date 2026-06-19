@@ -126,6 +126,24 @@ function findSegment(time) {
   return null;
 }
 
+function createJobId() {
+  return globalThis.crypto?.randomUUID?.() || `job-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function progressLabel(progress) {
+  if (!progress) return null;
+  if (progress.phase === 'fetching') return 'Đang lấy caption từ YouTube...';
+  if (progress.phase === 'grouping') return 'Đang ghép caption thành câu hoàn chỉnh...';
+  if (progress.phase === 'formatting') return 'Đang căn thời gian phụ đề...';
+  if (progress.phase === 'translating') {
+    if (!progress.total) return 'Đang chuẩn bị dịch và ước tính thời gian...';
+    if (!progress.completed) return `Đang dịch 0/${progress.total} câu · đang ước tính...`;
+    const eta = progress.eta_seconds == null ? null : Math.max(1, Math.ceil(progress.eta_seconds));
+    return `Đã dịch ${progress.completed}/${progress.total} câu${eta ? ` · còn khoảng ${eta}s` : ' · gần xong'}`;
+  }
+  return null;
+}
+
 function renderLoop() {
   if (ensureOverlay()) {
     const video = getActiveVideo();
@@ -149,13 +167,31 @@ async function loadForCurrentVideo(forceRefresh = false) {
   currentRequestKey = key;
   segments = [];
   const version = ++requestVersion;
-  showStatus('Đang ghép câu và dịch phụ đề...', false, 0);
-  const response = await chrome.runtime.sendMessage({
-    type: 'fetch-subtitles', videoId,
-    targetLanguage: settings.targetLanguage,
-    pacing: settings.pacing,
-    forceRefresh,
-  });
+  const jobId = createJobId();
+  showStatus('Đang lấy caption và ước tính thời gian...', false, 0);
+  let polling = true;
+  let pollTimer = 0;
+  const pollProgress = async () => {
+    if (!polling || version !== requestVersion) return;
+    const progressResponse = await chrome.runtime.sendMessage({ type: 'get-progress', jobId });
+    const label = progressResponse?.ok ? progressLabel(progressResponse.data) : null;
+    if (label) showStatus(label, false, 0);
+    if (polling) pollTimer = setTimeout(pollProgress, 400);
+  };
+  pollTimer = setTimeout(pollProgress, 300);
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: 'fetch-subtitles', videoId,
+      targetLanguage: settings.targetLanguage,
+      pacing: settings.pacing,
+      forceRefresh,
+      jobId,
+    });
+  } finally {
+    polling = false;
+    clearTimeout(pollTimer);
+  }
   if (version !== requestVersion || key !== currentRequestKey) return;
   if (!response?.ok || !response.data) {
     showStatus(response?.error || 'Backend chưa chạy.', true, 8000);
@@ -170,7 +206,7 @@ async function initialize() {
   ensureOverlay();
   renderLoop();
   loadForCurrentVideo();
-  document.addEventListener('yt-navigate-finish', () => setTimeout(loadForCurrentVideo, 350));
+  document.addEventListener('yt-navigate-finish', () => setTimeout(loadForCurrentVideo, 50));
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === 'reload-subtitles') {
       loadForCurrentVideo(Boolean(message.forceRefresh)).then(() => sendResponse({ ok: true }));

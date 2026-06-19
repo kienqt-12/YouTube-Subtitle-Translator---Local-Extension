@@ -5,7 +5,7 @@ export default defineConfig({
   manifest: {
     name: 'YouTube Subtitle Translator AI',
     description: 'Dịch và hiển thị phụ đề trực tiếp trên video YouTube bằng backend local.',
-    version: '1.0.0',
+    version: '1.2.0',
     permissions: ['storage', 'tabs'],
     host_permissions: ['http://127.0.0.1:8765/*'],
     action: {

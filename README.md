@@ -61,6 +61,10 @@ Chọn thư mục `extension_dist` nằm trong thư mục dự án vừa clone h
 
 Phụ đề được đồng bộ với `video.currentTime` và hiển thị bằng Shadow DOM ngay trên player. Nút `↻` dịch lại video và bỏ qua cache hiện tại.
 
+Trong lần dịch đầu, extension hiển thị tiến trình ngay trên video: giai đoạn đang lấy caption, ghép câu, số câu đã dịch và thời gian hoàn thành ước tính. ETA được tính từ tốc độ dịch thực tế nên có thể tự điều chỉnh trong quá trình chạy.
+
+Extension lưu tối đa 12 video đã dịch trong `chrome.storage.local`. Khi xem lại cùng video, ngôn ngữ và nhịp câu, phụ đề được tải gần như tức thì mà không cần dịch lại. Backend đóng gói nhiều câu trong mỗi request và chỉ chạy tối đa 2 request đồng thời, giúp lần dịch đầu nhanh nhưng tránh bị Google giới hạn vì gửi quá nhiều request.
+
 ## Phạm vi local
 
 Backend chỉ bind tại:
@@ -88,6 +92,8 @@ setup_extension.bat
 ```
 
 Sau đó mở trang quản lý extension và bấm nút **Reload / Tải lại** trên extension.
+
+Khi cập nhật thuật toán backend, hãy đóng cửa sổ backend cũ rồi mở lại `run_extension_backend.bat`. Tải lại tab YouTube để content script phiên bản mới được áp dụng.
 
 ## Những thư mục không đẩy lên GitHub
 

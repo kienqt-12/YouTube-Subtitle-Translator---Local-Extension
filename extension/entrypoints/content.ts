@@ -166,6 +166,36 @@ function findSegment(time: number): SubtitleSegment | null {
   return null;
 }
 
+interface TranslationProgress {
+  phase: 'starting' | 'fetching' | 'grouping' | 'translating' | 'formatting' | 'done' | 'error';
+  completed?: number;
+  total?: number;
+  eta_seconds?: number | null;
+}
+
+function createJobId() {
+  return globalThis.crypto?.randomUUID?.()
+    || `job-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function progressLabel(progress: TranslationProgress | null) {
+  if (!progress) return null;
+  if (progress.phase === 'fetching') return 'Đang lấy caption từ YouTube...';
+  if (progress.phase === 'grouping') return 'Đang ghép caption thành câu hoàn chỉnh...';
+  if (progress.phase === 'formatting') return 'Đang căn thời gian phụ đề...';
+  if (progress.phase === 'translating') {
+    if (!progress.total) return 'Đang chuẩn bị dịch và ước tính thời gian...';
+    if (!progress.completed) {
+      return `Đang dịch 0/${progress.total} câu · đang ước tính...`;
+    }
+    const eta = progress.eta_seconds == null
+      ? null
+      : Math.max(1, Math.ceil(progress.eta_seconds));
+    return `Đã dịch ${progress.completed}/${progress.total} câu${eta ? ` · còn khoảng ${eta}s` : ' · gần xong'}`;
+  }
+  return null;
+}
+
 function renderLoop() {
   if (ensureOverlay() && subtitleBox) {
     const video = getActiveVideo();
@@ -193,15 +223,38 @@ async function loadForCurrentVideo(forceRefresh = false) {
   currentRequestKey = requestKey;
   segments = [];
   const version = ++requestVersion;
-  showStatus('Đang ghép câu và dịch phụ đề...', false, 0);
+  const jobId = createJobId();
+  showStatus('Đang lấy caption và ước tính thời gian...', false, 0);
+  let polling = true;
+  let pollTimer: number | undefined;
+  const pollProgress = async () => {
+    if (!polling || version !== requestVersion) return;
+    const progressResponse = (await browser.runtime.sendMessage({
+      type: 'get-progress',
+      jobId,
+    })) as RuntimeResponse<TranslationProgress | null>;
+    const label = progressResponse?.ok
+      ? progressLabel(progressResponse.data || null)
+      : null;
+    if (label) showStatus(label, false, 0);
+    if (polling) pollTimer = window.setTimeout(pollProgress, 400);
+  };
+  pollTimer = window.setTimeout(pollProgress, 300);
 
-  const response = (await browser.runtime.sendMessage({
-    type: 'fetch-subtitles',
-    videoId,
-    targetLanguage: settings.targetLanguage,
-    pacing: settings.pacing,
-    forceRefresh,
-  })) as RuntimeResponse<SubtitleResponse>;
+  let response: RuntimeResponse<SubtitleResponse>;
+  try {
+    response = (await browser.runtime.sendMessage({
+      type: 'fetch-subtitles',
+      videoId,
+      targetLanguage: settings.targetLanguage,
+      pacing: settings.pacing,
+      forceRefresh,
+      jobId,
+    })) as RuntimeResponse<SubtitleResponse>;
+  } finally {
+    polling = false;
+    if (pollTimer) window.clearTimeout(pollTimer);
+  }
 
   if (version !== requestVersion || currentVideoId !== videoId) return;
   if (!response?.ok || !response.data) {
@@ -220,7 +273,7 @@ async function loadForCurrentVideo(forceRefresh = false) {
 
 export default defineContentScript({
   matches: ['https://www.youtube.com/*'],
-  runAt: 'document_idle',
+  runAt: 'document_start',
   async main() {
     settings = await getSettings();
     ensureOverlay();
@@ -228,7 +281,7 @@ export default defineContentScript({
     await loadForCurrentVideo();
 
     document.addEventListener('yt-navigate-finish', () => {
-      window.setTimeout(() => loadForCurrentVideo(), 350);
+      window.setTimeout(() => loadForCurrentVideo(), 50);
     });
 
     browser.runtime.onMessage.addListener(async (message) => {
