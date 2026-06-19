@@ -509,7 +509,7 @@ def build_translated_subtitles(video_id, target_language="vi",
             "phase": "translating",
             "completed": 0,
             "total": len(sentences),
-            "eta_seconds": None,
+            "eta_seconds": round(max(1.0, min(30.0, len(sentences) / 55.0)), 1),
         })
     translated = translate_segments(
         sentences,

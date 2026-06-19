@@ -125,7 +125,11 @@ class LocalSubtitleHandler(BaseHTTPRequestHandler):
                         "total": cached.get("sentence_count", 0),
                         "eta_seconds": 0,
                     })
-                    self.send_json(200, {**cached, "cached": True})
+                    self.send_json(200, {
+                        **cached,
+                        "cached": True,
+                        "cache_source": "backend",
+                    })
                     return
 
             update_progress(job_id, {

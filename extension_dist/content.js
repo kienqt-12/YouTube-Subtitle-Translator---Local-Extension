@@ -137,8 +137,15 @@ function progressLabel(progress) {
   if (progress.phase === 'formatting') return 'Đang căn thời gian phụ đề...';
   if (progress.phase === 'translating') {
     if (!progress.total) return 'Đang chuẩn bị dịch và ước tính thời gian...';
-    if (!progress.completed) return `Đang dịch 0/${progress.total} câu · đang ước tính...`;
-    const eta = progress.eta_seconds == null ? null : Math.max(1, Math.ceil(progress.eta_seconds));
+    const elapsedSinceUpdate = progress.updated_at
+      ? Math.max(0, Date.now() / 1000 - progress.updated_at)
+      : 0;
+    const eta = progress.eta_seconds == null
+      ? null
+      : Math.max(1, Math.ceil(progress.eta_seconds - elapsedSinceUpdate));
+    if (!progress.completed) {
+      return `Đang dịch 0/${progress.total} câu${eta ? ` · còn khoảng ${eta}s` : ' · đang ước tính...'}`;
+    }
     return `Đã dịch ${progress.completed}/${progress.total} câu${eta ? ` · còn khoảng ${eta}s` : ' · gần xong'}`;
   }
   return null;
@@ -168,7 +175,8 @@ async function loadForCurrentVideo(forceRefresh = false) {
   segments = [];
   const version = ++requestVersion;
   const jobId = createJobId();
-  showStatus('Đang lấy caption và ước tính thời gian...', false, 0);
+  const progressStartedAt = Date.now();
+  showStatus('Đang kiểm tra cache và lấy caption...', false, 0);
   let polling = true;
   let pollTimer = 0;
   const pollProgress = async () => {
@@ -176,9 +184,9 @@ async function loadForCurrentVideo(forceRefresh = false) {
     const progressResponse = await chrome.runtime.sendMessage({ type: 'get-progress', jobId });
     const label = progressResponse?.ok ? progressLabel(progressResponse.data) : null;
     if (label) showStatus(label, false, 0);
-    if (polling) pollTimer = setTimeout(pollProgress, 400);
+    if (polling) pollTimer = setTimeout(pollProgress, 100);
   };
-  pollTimer = setTimeout(pollProgress, 300);
+  pollTimer = setTimeout(pollProgress, 50);
   let response;
   try {
     response = await chrome.runtime.sendMessage({
@@ -198,7 +206,18 @@ async function loadForCurrentVideo(forceRefresh = false) {
     return;
   }
   segments = response.data.segments;
-  showStatus(`Đã dịch ${response.data.sentence_count} câu${response.data.cached ? ' (cache)' : ''}.`);
+  const fromCache = response.data.cache_source === 'extension'
+    || response.data.cache_source === 'backend'
+    || response.data.cached;
+  if (!fromCache) {
+    const remainingDisplayTime = Math.max(0, 1500 - (Date.now() - progressStartedAt));
+    if (remainingDisplayTime) {
+      await new Promise((resolve) => setTimeout(resolve, remainingDisplayTime));
+    }
+  }
+  showStatus(fromCache
+    ? `Đã tải ${response.data.sentence_count} câu từ cache.`
+    : `Đã dịch xong ${response.data.sentence_count} câu.`);
 }
 
 async function initialize() {

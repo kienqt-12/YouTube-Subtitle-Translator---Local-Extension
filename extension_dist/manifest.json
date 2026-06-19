@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Subtitle Translator AI",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Dịch và hiển thị phụ đề trực tiếp trên video YouTube bằng backend local.",
   "permissions": ["storage", "tabs"],
   "host_permissions": ["http://127.0.0.1:8765/*"],
