@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Subtitle Translator AI</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div class="brand-row">
+      <div class="logo">CC</div>
+      <div><h1>Subtitle Translator AI</h1><p>Phụ đề dịch trực tiếp trên YouTube</p></div>
+    </div>
+    <button id="backend-status" class="backend checking">● Đang kiểm tra backend...</button>
+  </header>
+  <main>
+    <section class="card">
+      <h2>Hiển thị</h2>
+      <label class="row"><span>Bật phụ đề dịch</span><input id="enabled" type="checkbox" role="switch"></label>
+      <label class="row"><span>Ẩn caption YouTube</span><input id="hideNativeCaptions" type="checkbox" role="switch"></label>
+    </section>
+    <section class="card grid-two">
+      <label><span>Ngôn ngữ đích</span><select id="targetLanguage">
+        <option value="vi">Tiếng Việt</option><option value="en">English</option>
+        <option value="ja">日本語</option><option value="ko">한국어</option><option value="zh-CN">中文</option>
+      </select></label>
+      <label><span>Nhịp ngắt câu</span><select id="pacing">
+        <option value="short">Ngắn, dễ đọc</option>
+        <option value="natural">Tự nhiên</option>
+        <option value="long">Câu dài, liền ý</option>
+      </select></label>
+    </section>
+    <section class="card">
+      <h2>Kiểu phụ đề</h2>
+      <label class="range-label"><span>Cỡ chữ</span><strong id="fontSizeValue"></strong>
+        <input id="fontSize" type="range" min="20" max="48" step="1"></label>
+      <label class="range-label"><span>Độ đậm nền</span><strong id="opacityValue"></strong>
+        <input id="backgroundOpacity" type="range" min="0" max="95" step="5"></label>
+      <div class="grid-two">
+        <label><span>Màu chữ</span><input id="textColor" type="color"></label>
+        <label><span>Vị trí</span><select id="position"><option value="bottom">Phía dưới</option><option value="top">Phía trên</option></select></label>
+      </div>
+    </section>
+    <div class="actions"><button id="apply" class="primary">Áp dụng vào video</button><button id="refresh" title="Dịch lại">↻</button></div>
+    <p id="message"></p>
+    <div id="backend-help" class="help hidden">Chạy <strong>run_extension_backend.bat</strong> rồi bấm kiểm tra lại.</div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

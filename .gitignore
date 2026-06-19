@@ -1,0 +1,56 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Node/WXT dependencies and generated builds
+node_modules/
+extension/node_modules/
+extension/.output/
+extension/.wxt/
+extension/.vite/
+.npm-cache/
+*.crx
+*.zip
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Editor and local agent settings
+.vscode/
+.idea/
+.agents/
+*.code-workspace
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Keep the ready-to-load local extension in Git
+!extension_dist/
+!extension_dist/**
